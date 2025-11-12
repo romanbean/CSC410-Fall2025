@@ -1,17 +1,13 @@
 #include <stdio.h>
-#include <stdlib.h> // For malloc() and free()
+#include <stdlib.h>
 #include <mpi.h>
 
-//#define N 4
-#define N 1000 // Adjust this to test larger matrix sizes
-//#define N 100000000
+#define N 1000 // Adjust for testing
 
-void displayMatrix(int** matrix, int n) 
-{
+void displayMatrix(int* matrix, int n) {
     for (int i = 0; i < n; ++i) {
-        for (int j = 0; j < n; ++j) {
-            printf("%d ", matrix[i][j]);
-        }
+        for (int j = 0; j < n; ++j)
+            printf("%d ", matrix[i * n + j]);
         printf("\n");
     }
 }

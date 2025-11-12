@@ -4,95 +4,84 @@
 int main(int argc, char* argv[]) {
     int rank, size;
     int n = N;
-    int** A = NULL;
-    int** B = NULL;
-    int** C = NULL;
 
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+    if (n % size != 0) {
+        if (rank == 0)
+            printf("Matrix size %d not divisible by number of processes %d!\n", n, size);
+        MPI_Finalize();
+        return 0;
+    }
+
     int rows_per_proc = n / size;
 
-    // Allocate full matrices in root process
-    if (rank == 0) {
-        A = (int**)malloc(n * sizeof(int*));
-        B = (int**)malloc(n * sizeof(int*));
-        C = (int**)malloc(n * sizeof(int*));
-        for (int i = 0; i < n; ++i) {
-            A[i] = (int*)malloc(n * sizeof(int));
-            B[i] = (int*)malloc(n * sizeof(int));
-            C[i] = (int*)malloc(n * sizeof(int));
-        }
+    // Allocate memory
+    int* A = NULL;
+    int* B = (int*)malloc(n * n * sizeof(int));
+    int* C = NULL;
 
+    if (rank == 0) {
+        A = (int*)malloc(n * n * sizeof(int));
+        C = (int*)malloc(n * n * sizeof(int));
+
+        // Initialize matrices
         for (int i = 0; i < n; ++i)
             for (int j = 0; j < n; ++j) {
-                A[i][j] = 1;
-                B[i][j] = 1;
-                C[i][j] = 0;
+                A[i * n + j] = 1;
+                B[i * n + j] = 1;
             }
     }
 
-    // Allocate space for local matrices
-    int** local_A = (int**)malloc(rows_per_proc * sizeof(int*));
-    int** local_C = (int**)malloc(rows_per_proc * sizeof(int*));
-    for (int i = 0; i < rows_per_proc; ++i) {
-        local_A[i] = (int*)malloc(n * sizeof(int));
-        local_C[i] = (int*)malloc(n * sizeof(int));
-    }
+    int* local_A = (int*)malloc(rows_per_proc * n * sizeof(int));
+    int* local_C = (int*)malloc(rows_per_proc * n * sizeof(int));
 
-    // Allocate and broadcast matrix B
-    if (rank != 0)
-        B = (int**)malloc(n * sizeof(int*));
-    for (int i = 0; i < n; ++i)
-        if (rank != 0)
-            B[i] = (int*)malloc(n * sizeof(int));
+    // Start timing
+    double start_time = MPI_Wtime();
 
-    // Send B matrix to all processes
-    for (int i = 0; i < n; i++)
-        MPI_Bcast(B[i], n, MPI_INT, 0, MPI_COMM_WORLD);
+    // Broadcast B to all processes
+    MPI_Bcast(B, n * n, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // Scatter A among all processes
-    for (int i = 0; i < rows_per_proc; i++) {
-        MPI_Scatter(A ? A[i] : NULL, n, MPI_INT,
-                    local_A[i], n, MPI_INT, 0, MPI_COMM_WORLD);
-    }
+    // Scatter A
+    MPI_Scatter(A, rows_per_proc * n, MPI_INT,
+                local_A, rows_per_proc * n, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // Perform partial matrix multiplication
+    // Local matrix multiplication
     for (int i = 0; i < rows_per_proc; i++) {
         for (int j = 0; j < n; j++) {
-            local_C[i][j] = 0;
+            int sum = 0;
             for (int k = 0; k < n; k++)
-                local_C[i][j] += local_A[i][k] * B[k][j];
+                sum += local_A[i * n + k] * B[k * n + j];
+            local_C[i * n + j] = sum;
         }
     }
 
-    // Gather results to root process
-    for (int i = 0; i < rows_per_proc; i++) {
-        MPI_Gather(local_C[i], n, MPI_INT,
-                   C ? C[i] : NULL, n, MPI_INT, 0, MPI_COMM_WORLD);
-    }
+    // Gather results
+    MPI_Gather(local_C, rows_per_proc * n, MPI_INT,
+               C, rows_per_proc * n, MPI_INT, 0, MPI_COMM_WORLD);
 
+    // End timing
+    double end_time = MPI_Wtime();
+    double elapsed = end_time - start_time;
+
+    // Print result and timing
     if (rank == 0) {
         printf("Parallel Matrix Multiplication Complete!\n");
-        // displayMatrix(C, n); // Uncomment to display
+        printf("Matrix size: %dx%d, Processes: %d\n", n, n, size);
+        printf("Elapsed time: %f seconds\n", elapsed);
+
+        // Optional correctness check
+        // printf("Sample result (C[0][0]) = %d\n", C[0]);
     }
 
-    // Cleanup
-    for (int i = 0; i < rows_per_proc; ++i) {
-        free(local_A[i]);
-        free(local_C[i]);
-    }
+    // Free memory
     free(local_A);
     free(local_C);
+    free(B);
     if (rank == 0) {
-        for (int i = 0; i < n; i++) {
-            free(A[i]);
-            free(B[i]);
-            free(C[i]);
-        }
         free(A);
-        free(B);
         free(C);
     }
 

@@ -2,9 +2,7 @@
 #include <stdlib.h> // For malloc() and free()
 #include <omp.h>
 
-//#define N 4
-#define N 1000 // Adjust this to test larger matrix sizes
-//#define N 100000000
+#define N 1000 // Adjust this 
 
 void displayMatrix(int** matrix, int n) 
 {

@@ -1,4 +1,4 @@
-// mainM.c
+// OPTIMIZED for Intel Celeron iGPU
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -6,9 +6,10 @@
 #define CL_TARGET_OPENCL_VERSION 300
 #include <CL/cl.h>
 
-#define N 1024   // You can change matrix size here
+#define TILE 16        // tile size (best for Intel iGPU)
+#define N 1024         // matrix size
 
-// Sequential CPU matrix multiplication
+// Sequential CPU multiplication
 void matrixMultiplyCPU(int** A, int** B, int** C, int n) {
     for (int i = 0; i < n; ++i) {
         for (int j = 0; j < n; ++j) {
@@ -20,16 +21,7 @@ void matrixMultiplyCPU(int** A, int** B, int** C, int n) {
     }
 }
 
-// Function to display matrix (optional)
-void displayMatrix(int** matrix, int n) {
-    for (int i = 0; i < n; ++i) {
-        for (int j = 0; j < n; ++j)
-            printf("%d ", matrix[i][j]);
-        printf("\n");
-    }
-}
-
-// Helper: create 2D matrix
+// Matrix helpers
 int** createMatrix(int n) {
     int** mat = (int**)malloc(n * sizeof(int*));
     for (int i = 0; i < n; ++i)
@@ -37,14 +29,13 @@ int** createMatrix(int n) {
     return mat;
 }
 
-// Free 2D matrix
 void freeMatrix(int** mat, int n) {
     for (int i = 0; i < n; ++i)
         free(mat[i]);
     free(mat);
 }
 
-// OpenCL error checkIn file included from /usr/include/CL/cl.h:20,
+// Error macro
 #define CHECK_ERROR(status, msg) \
     if (status != CL_SUCCESS) { \
         printf("%s failed (%d)\n", msg, status); \
@@ -53,11 +44,14 @@ void freeMatrix(int** mat, int n) {
 
 int main() {
     int i, j;
+
+    // ----------------------------
+    // Allocate CPU matrices
+    // ----------------------------
     int** A = createMatrix(N);
     int** B = createMatrix(N);
-    int** C = createMatrix(N);  // for CPU result
+    int** C = createMatrix(N);  // CPU result
 
-    // Initialize matrices
     for (i = 0; i < N; ++i)
         for (j = 0; j < N; ++j) {
             A[i][j] = 1;
@@ -68,117 +62,145 @@ int main() {
     printf("Matrices initialized.\n");
 
     // ----------------------------
-    // Sequential CPU multiplication
+    // CPU multiplication
     // ----------------------------
     clock_t start_cpu = clock();
     matrixMultiplyCPU(A, B, C, N);
     clock_t end_cpu = clock();
     double cpu_time = ((double)(end_cpu - start_cpu)) / CLOCKS_PER_SEC;
-    printf("Sequential CPU multiplication time: %f seconds\n", cpu_time);
+    printf("CPU multiplication time: %.4f sec\n", cpu_time);
 
     // ----------------------------
     // OpenCL setup
     // ----------------------------
     cl_int status;
 
-    // 1. Get platform
     cl_platform_id platform;
     status = clGetPlatformIDs(1, &platform, NULL);
     CHECK_ERROR(status, "clGetPlatformIDs");
 
-    // 2. Get device
     cl_device_id device;
     status = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
     CHECK_ERROR(status, "clGetDeviceIDs");
 
-    // 3. Create context
     cl_context context = clCreateContext(NULL, 1, &device, NULL, NULL, &status);
     CHECK_ERROR(status, "clCreateContext");
 
-    // 4. Create command queue
-    cl_queue_properties props[]  = {0};
-    cl_command_queue queue = clCreateCommandQueueWithProperties(context, device, props, &status);
-    CHECK_ERROR(status, "clCreateContent");
-    
-    // 5. Flatten matrices for OpenCL
-    int* flatA = (int*)malloc(N * N * sizeof(int));
-    int* flatB = (int*)malloc(N * N * sizeof(int));
-    int* flatC = (int*)malloc(N * N * sizeof(int));
+    cl_command_queue queue = clCreateCommandQueueWithProperties(context, device, NULL, &status);
+    CHECK_ERROR(status, "clCreateCommandQueueWithProperties");
 
-    for (i = 0; i < N; ++i)
-        for (j = 0; j < N; ++j) {
+    // ----------------------------
+    // Flatten matrices
+    // ----------------------------
+    int* flatA = (int*)malloc(N*N*sizeof(int));
+    int* flatB = (int*)malloc(N*N*sizeof(int));
+    int* flatC = (int*)malloc(N*N*sizeof(int));
+
+    for (i = 0; i < N; i++)
+        for (j = 0; j < N; j++) {
             flatA[i*N + j] = A[i][j];
             flatB[i*N + j] = B[i][j];
             flatC[i*N + j] = 0;
         }
 
-    // 6. Create buffers
-    cl_mem bufA = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, N*N*sizeof(int), flatA, &status);
+    // ----------------------------
+    // Create OpenCL buffers
+    // ----------------------------
+    cl_mem bufA = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                 N*N*sizeof(int), flatA, &status);
     CHECK_ERROR(status, "clCreateBuffer A");
-    cl_mem bufB = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, N*N*sizeof(int), flatB, &status);
+
+    cl_mem bufB = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                 N*N*sizeof(int), flatB, &status);
     CHECK_ERROR(status, "clCreateBuffer B");
-    cl_mem bufC = clCreateBuffer(context, CL_MEM_WRITE_ONLY, N*N*sizeof(int), NULL, &status);
+
+    cl_mem bufC = clCreateBuffer(context, CL_MEM_WRITE_ONLY,
+                                 N*N*sizeof(int), NULL, &status);
     CHECK_ERROR(status, "clCreateBuffer C");
 
-    // 7. OpenCL kernel code
+    // ----------------------------
+    // Optimized tiled OpenCL kernel for my outdated GPU
+    // ----------------------------
     const char* kernelSource =
-        "__kernel void matMul(__global int* A, __global int* B, __global int* C, int N) {"
-        "   int row = get_global_id(0);"
-        "   int col = get_global_id(1);"
-        "   int sum = 0;"
-        "   for (int k = 0; k < N; ++k)"
-        "       sum += A[row*N + k] * B[k*N + col];"
-        "   C[row*N + col] = sum;"
+        "__kernel void matMulTiled(__global int* A, __global int* B, __global int* C, int N) {"
+        "    __local int tileA[16][16];"
+        "    __local int tileB[16][16];"
+        "    int row = get_global_id(0);"
+        "    int col = get_global_id(1);"
+        "    int lr = get_local_id(0);"
+        "    int lc = get_local_id(1);"
+        "    int sum = 0;"
+        "    for (int t = 0; t < N/16; t++) {"
+        "        tileA[lr][lc] = A[row*N + (t*16 + lc)];"
+        "        tileB[lr][lc] = B[(t*16 + lr)*N + col];"
+        "        barrier(CLK_LOCAL_MEM_FENCE);"
+        "        for (int k = 0; k < 16; k++)"
+        "            sum += tileA[lr][k] * tileB[k][lc];"
+        "        barrier(CLK_LOCAL_MEM_FENCE);"
+        "    }"
+        "    C[row*N + col] = sum;"
         "}";
 
-    // 8. Create program
     cl_program program = clCreateProgramWithSource(context, 1, &kernelSource, NULL, &status);
     CHECK_ERROR(status, "clCreateProgramWithSource");
 
-    // 9. Build program
     status = clBuildProgram(program, 1, &device, NULL, NULL, NULL);
     if (status != CL_SUCCESS) {
-        size_t logSize;
-        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &logSize);
-        char* log = (char*)malloc(logSize);
-        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, logSize, log, NULL);
-        printf("Build log:\n%s\n", log);
-        free(log);
+        size_t size;
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &size);
+        char* log = malloc(size);
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, size, log, NULL);
+        printf("BUILD LOG:\n%s\n", log);
         exit(1);
     }
 
-    // 10. Create kernel
-    cl_kernel kernel = clCreateKernel(program, "matMul", &status);
+    cl_kernel kernel = clCreateKernel(program, "matMulTiled", &status);
     CHECK_ERROR(status, "clCreateKernel");
 
-    // 11. Set kernel arguments
-    status = clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufA);
-    status |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &bufB);
-    status |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &bufC);
+    // Kernel args
     int n = N;
-    status |= clSetKernelArg(kernel, 3, sizeof(int), &n);
-    CHECK_ERROR(status, "clSetKernelArg");
 
-    // 12. Define global size
-    size_t globalSize[2] = {N, N};
+    clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufA);
+    clSetKernelArg(kernel, 1, sizeof(cl_mem), &bufB);
+    clSetKernelArg(kernel, 2, sizeof(cl_mem), &bufC);
+    clSetKernelArg(kernel, 3, sizeof(int), &n);
+
+    // Global/local sizes
+    size_t local[2]  = {TILE, TILE};
+    size_t global[2] = {N, N};
 
     // ----------------------------
-    // OpenCL GPU multiplication
+    // Run GPU kernel
     // ----------------------------
     struct timeval t1, t2;
     gettimeofday(&t1, NULL);
 
-    status = clEnqueueNDRangeKernel(queue, kernel, 2, NULL, globalSize, NULL, 0, NULL, NULL);
+    status = clEnqueueNDRangeKernel(queue, kernel, 2, NULL, global, local, 0, NULL, NULL);
     CHECK_ERROR(status, "clEnqueueNDRangeKernel");
 
     clFinish(queue);
 
     gettimeofday(&t2, NULL);
     double gpu_time = (t2.tv_sec - t1.tv_sec) + (t2.tv_usec - t1.tv_usec)/1e6;
-    printf("OpenCL GPU multiplication time: %f seconds\n", gpu_time);
-    printf("Speedup: %.2fx\n", cpu_time / gpu_time);
+    printf("GPU multiplication time: %.4f sec\n", gpu_time);
 
-    // 13. Cleanup
+    // ----------------------------
+    // Read back results
+    // ----------------------------
+    clEnqueueReadBuffer(queue, bufC, CL_TRUE, 0, N*N*sizeof(int), flatC, 0, NULL, NULL);
+
+    // ----------------------------
+    // Verify correctness
+    // ----------------------------
+    int errors = 0;
+    for (int k = 0; k < N*N; k++) {
+        if (flatC[k] != C[k/N][k%N]) {
+            errors++;
+            break;
+        }
+    }
+
+    // Cleanup
     clReleaseMemObject(bufA);
     clReleaseMemObject(bufB);
     clReleaseMemObject(bufC);

@@ -1,4 +1,4 @@
-// OpenCL for N-body simulation
+// OpenCL N-body simulation (2D)
 
 #define CL_TARGET_OPENCL_VERSION 120
 #include <CL/cl.h>
@@ -13,13 +13,15 @@
 #define MIN_DISTANCE 1e3f
 #define MAX_FORCE 1e20f
 
+int num_bodies = NUM_BODIES;
+
 typedef struct {
     float x, y;
     float vx, vy;
     float mass;
 } Body;
 
-// Kernel: compute forces
+// OpenCL kernel to compute forces
 const char *kernel_source = R"(
 typedef struct {
     float x, y;
@@ -39,21 +41,25 @@ __kernel void compute_forces(__global const Body *bodies,
     float fy_i = 0.0f;
 
     for (int j = 0; j < num_bodies; j++) {
-        if (i != j) {
-            float dx = bodies[j].x - bodies[i].x;
-            float dy = bodies[j].y - bodies[i].y;
-            float distance_sq = dx * dx + dy * dy;
+        if (i == j) continue;
 
-            if (distance_sq < 1e6f) distance_sq = 1e6f;
+        float dx = bodies[j].x - bodies[i].x;
+        float dy = bodies[j].y - bodies[i].y;
+        float distance_sq = dx * dx + dy * dy;
 
-            float distance = sqrt(distance_sq);
+        // Clamp minimum distance to avoid singularities
+        if (distance_sq < 1e6f) distance_sq = 1e6f;
 
-            float force_mag = (6.67430e-11f * bodies[i].mass * bodies[j].mass) / distance_sq;
-            if (force_mag > 1e20f) force_mag = 1e20f;
+        float distance = sqrt(distance_sq);
 
-            fx_i += force_mag * dx / distance;
-            fy_i += force_mag * dy / distance;
-        }
+        float force_magnitude =
+            (6.67430e-11f * bodies[i].mass * bodies[j].mass) / distance_sq;
+
+        // Cap the force magnitude
+        if (force_magnitude > 1e20f) force_magnitude = 1e20f;
+
+        fx_i += force_magnitude * dx / distance;
+        fy_i += force_magnitude * dy / distance;
     }
 
     fx[i] = fx_i;
@@ -61,7 +67,7 @@ __kernel void compute_forces(__global const Body *bodies,
 }
 )";
 
-// Kernel: update bodies
+// OpenCL kernel to update bodies
 const char *update_kernel_source = R"(
 typedef struct {
     float x, y;
@@ -78,44 +84,63 @@ __kernel void update_bodies(__global Body *bodies,
     int i = get_global_id(0);
     if (i >= num_bodies) return;
 
+    // Update velocities
     bodies[i].vx += fx[i] / bodies[i].mass * dt;
     bodies[i].vy += fy[i] / bodies[i].mass * dt;
 
+    // Update positions
     bodies[i].x += bodies[i].vx * dt;
     bodies[i].y += bodies[i].vy * dt;
 }
 )";
 
+static void check_err(cl_int err, const char *where) {
+    if (err != CL_SUCCESS) {
+        fprintf(stderr, "OpenCL error %d at %s\n", err, where);
+        exit(1);
+    }
+}
 
-int main() {
+int main(void) {
+    Body *bodies = (Body*)malloc(sizeof(Body) * NUM_BODIES);
+    if (!bodies) {
+        fprintf(stderr, "malloc failed\n");
+        return 1;
+    }
 
-    Body bodies[NUM_BODIES];
+    srand((unsigned)time(NULL));
 
-    // Initialize the bodies
+    // Initialize bodies
     for (int i = 0; i < NUM_BODIES; i++) {
-        bodies[i].x = rand() % 1000000000;
-        bodies[i].y = rand() % 1000000000;
-        bodies[i].vx = (rand() % 100 - 50) * 1e3;
-        bodies[i].vy = (rand() % 100 - 50) * 1e3;
-        bodies[i].mass = (rand() % 100 + 1) * 1e24;
+        bodies[i].x    = (float)(rand() % 1000000000);
+        bodies[i].y    = (float)(rand() % 1000000000);
+        bodies[i].vx   = ((float)(rand() % 100) - 50.0f) * 1e3f;
+        bodies[i].vy   = ((float)(rand() % 100) - 50.0f) * 1e3f;
+        bodies[i].mass = ((float)(rand() % 100) + 1.0f) * 1e24f;
     }
 
     cl_int err;
 
-    // PLATFORM + DEVICE
     cl_platform_id platform;
-    clGetPlatformIDs(1, &platform, NULL);
+    err = clGetPlatformIDs(1, &platform, NULL);
+    check_err(err, "clGetPlatformIDs");
 
     cl_device_id device;
-    clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+    if (err != CL_SUCCESS) {
+        err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_CPU, 1, &device, NULL);
+    }
+    check_err(err, "clGetDeviceIDs");
 
-    // CONTEXT + QUEUE
     cl_context context = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
-    cl_command_queue queue = clCreateCommandQueue(context, device, 0, &err);
+    check_err(err, "clCreateContext");
 
-    // ----------------------------
-    // CREATE BUFFERS
-    // ----------------------------
+    cl_command_queue queue = clCreateCommandQueue(context, device, 0, &err);
+    check_err(err, "clCreateCommandQueue");
+
+    memset(bodies, 0, sizeof(Body) * NUM_BODIES);
+    
+    // Buffers
     cl_mem buffer_bodies = clCreateBuffer(
         context,
         CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
@@ -123,6 +148,7 @@ int main() {
         bodies,
         &err
     );
+    check_err(err, "clCreateBuffer bodies");
 
     cl_mem buffer_fx = clCreateBuffer(
         context,
@@ -131,6 +157,7 @@ int main() {
         NULL,
         &err
     );
+    check_err(err, "clCreateBuffer fx");
 
     cl_mem buffer_fy = clCreateBuffer(
         context,
@@ -139,65 +166,108 @@ int main() {
         NULL,
         &err
     );
+    check_err(err, "clCreateBuffer fy");
 
-    // ----------------------------
-    // BUILD PROGRAMS + KERNELS
-    // ----------------------------
-    cl_program program = clCreateProgramWithSource(context, 1, &kernel_source, NULL, &err);
-    clBuildProgram(program, 1, &device, NULL, NULL, NULL);
+    // Program and kernel: compute_forces
+    cl_program program =
+        clCreateProgramWithSource(context, 1, &kernel_source, NULL, &err);
+    check_err(err, "clCreateProgramWithSource forces");
 
-    cl_kernel kernel = clCreateKernel(program, "compute_forces", &err);
+    err = clBuildProgram(program, 1, &device, NULL, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        // Show build log
+        size_t log_size = 0;
+        clGetProgramBuildInfo(program, device,
+                              CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        char *log = (char *)malloc(log_size);
+        clGetProgramBuildInfo(program, device,
+                              CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+        fprintf(stderr, "Build log (compute_forces):\n%s\n", log);
+        free(log);
+        check_err(err, "clBuildProgram forces");
+    }
 
-    cl_program update_program = clCreateProgramWithSource(context, 1, &update_kernel_source, NULL, &err);
-    clBuildProgram(update_program, 1, &device, NULL, NULL, NULL);
+    cl_kernel kernel =
+        clCreateKernel(program, "compute_forces", &err);
+    check_err(err, "clCreateKernel forces");
 
-    cl_kernel update_kernel = clCreateKernel(update_program, "update_bodies", &err);
+    // Program and kernel: update_bodies
+    cl_program update_program =
+        clCreateProgramWithSource(context, 1, &update_kernel_source, NULL, &err);
+    check_err(err, "clCreateProgramWithSource update");
 
-    // ----------------------------
-    // MAIN SIMULATION LOOP
-    // ----------------------------
+    err = clBuildProgram(update_program, 1, &device, NULL, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        size_t log_size = 0;
+        clGetProgramBuildInfo(update_program, device,
+                              CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        char *log = (char *)malloc(log_size);
+        clGetProgramBuildInfo(update_program, device,
+                              CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+        fprintf(stderr, "Build log (update_bodies):\n%s\n", log);
+        free(log);
+        check_err(err, "clBuildProgram update");
+    }
+
+    cl_kernel update_kernel =
+        clCreateKernel(update_program, "update_bodies", &err);
+    check_err(err, "clCreateKernel update");
+
+    // Set kernel args (constant over time)
+    err  = clSetKernelArg(kernel, 0, sizeof(cl_mem), &buffer_bodies);
+    err |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &buffer_fx);
+    err |= clSetKernelArg(kernel, 2, sizeof(cl_mem), &buffer_fy);
+    err |= clSetKernelArg(kernel, 3, sizeof(int), num_bodies);
+    check_err(err, "clSetKernelArg forces");
+
+    float dt = (float)DT;
+    err  = clSetKernelArg(update_kernel, 0, sizeof(cl_mem), &buffer_bodies);
+    err |= clSetKernelArg(update_kernel, 1, sizeof(cl_mem), &buffer_fx);
+    err |= clSetKernelArg(update_kernel, 2, sizeof(cl_mem), &buffer_fy);
+    err |= clSetKernelArg(update_kernel, 3, sizeof(float), &dt);
+    err |= clSetKernelArg(update_kernel, 4, sizeof(int), num_bodies);
+    check_err(err, "clSetKernelArg update");
+
+    // Simulation loop
     size_t global_size = NUM_BODIES;
 
     for (int step = 0; step < 1000; step++) {
+        // Compute forces
+        err = clEnqueueNDRangeKernel(queue, kernel,
+                                     1, NULL, &global_size, NULL,
+                                     0, NULL, NULL);
+        check_err(err, "clEnqueueNDRangeKernel forces");
 
-        // ---- Set args for compute_forces ----
-        clSetKernelArg(kernel, 0, sizeof(cl_mem), &buffer_bodies);
-        clSetKernelArg(kernel, 1, sizeof(cl_mem), &buffer_fx);
-        clSetKernelArg(kernel, 2, sizeof(cl_mem), &buffer_fy);
-        clSetKernelArg(kernel, 3, sizeof(int), &NUM_BODIES);
+        err = clFinish(queue);
+        check_err(err, "clFinish forces");
 
-        // Run force calculation
-        clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &global_size, NULL, 0, NULL, NULL);
+        // Update bodies
+        err = clEnqueueNDRangeKernel(queue, update_kernel,
+                                     1, NULL, &global_size, NULL,
+                                     0, NULL, NULL);
+        check_err(err, "clEnqueueNDRangeKernel update");
 
-        // ---- Set args for update kernel ----
-        clSetKernelArg(update_kernel, 0, sizeof(cl_mem), &buffer_bodies);
-        clSetKernelArg(update_kernel, 1, sizeof(cl_mem), &buffer_fx);
-        clSetKernelArg(update_kernel, 2, sizeof(cl_mem), &buffer_fy);
-        clSetKernelArg(update_kernel, 3, sizeof(float), &DT);
-        clSetKernelArg(update_kernel, 4, sizeof(int), &NUM_BODIES);
-
-        // Run update
-        clEnqueueNDRangeKernel(queue, update_kernel, 1, NULL, &global_size, NULL, 0, NULL, NULL);
-
-        // Wait for step to finish
-        clFinish(queue);
+        err = clFinish(queue);
+        check_err(err, "clFinish update");
     }
 
-    // ----------------------------
-    // READ BACK RESULTS
-    // ----------------------------
-    clEnqueueReadBuffer(queue, buffer_bodies, CL_TRUE, 0,
-                        sizeof(Body) * NUM_BODIES, bodies, 0, NULL, NULL);
+    // Read back results
+    err = clEnqueueReadBuffer(queue, buffer_bodies, CL_TRUE,
+                              0,
+                              sizeof(Body) * NUM_BODIES,
+                              bodies,
+                              0, NULL, NULL);
+    check_err(err, "clEnqueueReadBuffer bodies");
 
-    // ----------------------------
-    // PRINT FINAL RESULTS
-    // ----------------------------
+    // Print some bodies (all if you want)
     for (int i = 0; i < NUM_BODIES; i++) {
-        printf("Body %d: Position = (%.2f, %.2f), Velocity = (%.2f, %.2f)\n",
-               i, bodies[i].x, bodies[i].y, bodies[i].vx, bodies[i].vy);
+        printf("Body %d: Position = (%.2f, %.2f), "
+               "Velocity = (%.2f, %.2f)\n",
+               i, bodies[i].x, bodies[i].y,
+               bodies[i].vx, bodies[i].vy);
     }
 
-    // CLEAN UP
+    // Cleanup
     clReleaseMemObject(buffer_bodies);
     clReleaseMemObject(buffer_fx);
     clReleaseMemObject(buffer_fy);
@@ -208,5 +278,6 @@ int main() {
     clReleaseCommandQueue(queue);
     clReleaseContext(context);
 
+    free(bodies);
     return 0;
 }

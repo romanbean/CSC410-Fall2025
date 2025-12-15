@@ -84,12 +84,13 @@ int main() {
         bodies[i].mass = (rand() % 100 + 1) * 1e24; 
     }
 
+    /*
     // Simulate for 1000 steps
     for (int step = 0; step < 1000; step++) {
         printf("Step %d:\n", step);
         print_positions(bodies, NUM_BODIES);
         update_bodies(bodies, NUM_BODIES, DT);
-    }
+    }*/
 
     return 0;
 }

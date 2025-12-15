@@ -1,9 +1,9 @@
 // OpenCL N-body simulation (2D)
 
 #define CL_TARGET_OPENCL_VERSION 120
-#include <CL/cl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <CL/cl.h>
 #include <math.h>
 #include <time.h>
 
@@ -22,77 +22,73 @@ typedef struct {
 } Body;
 
 // OpenCL kernel to compute forces
-const char *kernel_source = R"(
-typedef struct {
-    float x, y;
-    float vx, vy;
-    float mass;
-} Body;
+const char *kernel_source =
+"typedef struct {\n"
+"    float x, y;\n"
+"    float vx, vy;\n"
+"    float mass;\n"
+"} Body;\n"
+"\n"
+"__kernel void compute_forces(__global const Body *bodies,\n"
+"                             __global float *fx,\n"
+"                             __global float *fy,\n"
+"                             const int num_bodies)\n"
+"{\n"
+"    int i = get_global_id(0);\n"
+"    if (i >= num_bodies) return;\n"
+"\n"
+"    float fx_i = 0.0f;\n"
+"    float fy_i = 0.0f;\n"
+"\n"
+"    for (int j = 0; j < num_bodies; j++) {\n"
+"        if (i == j) continue;\n"
+"\n"
+"        float dx = bodies[j].x - bodies[i].x;\n"
+"        float dy = bodies[j].y - bodies[i].y;\n"
+"        float distance_sq = dx * dx + dy * dy;\n"
+"\n"
+"        if (distance_sq < 1e6f) distance_sq = 1e6f;\n"
+"\n"
+"        float distance = sqrt(distance_sq);\n"
+"\n"
+"        float force_magnitude =\n"
+"            (6.67430e-11f * bodies[i].mass * bodies[j].mass) / distance_sq;\n"
+"\n"
+"        if (force_magnitude > 1e20f) force_magnitude = 1e20f;\n"
+"\n"
+"        fx_i += force_magnitude * dx / distance;\n"
+"        fy_i += force_magnitude * dy / distance;\n"
+"    }\n"
+"\n"
+"    fx[i] = fx_i;\n"
+"    fy[i] = fy_i;\n"
+"}\n";
 
-__kernel void compute_forces(__global const Body *bodies,
-                             __global float *fx,
-                             __global float *fy,
-                             const int num_bodies)
-{
-    int i = get_global_id(0);
-    if (i >= num_bodies) return;
-
-    float fx_i = 0.0f;
-    float fy_i = 0.0f;
-
-    for (int j = 0; j < num_bodies; j++) {
-        if (i == j) continue;
-
-        float dx = bodies[j].x - bodies[i].x;
-        float dy = bodies[j].y - bodies[i].y;
-        float distance_sq = dx * dx + dy * dy;
-
-        // Clamp minimum distance to avoid singularities
-        if (distance_sq < 1e6f) distance_sq = 1e6f;
-
-        float distance = sqrt(distance_sq);
-
-        float force_magnitude =
-            (6.67430e-11f * bodies[i].mass * bodies[j].mass) / distance_sq;
-
-        // Cap the force magnitude
-        if (force_magnitude > 1e20f) force_magnitude = 1e20f;
-
-        fx_i += force_magnitude * dx / distance;
-        fy_i += force_magnitude * dy / distance;
-    }
-
-    fx[i] = fx_i;
-    fy[i] = fy_i;
-}
-)";
 
 // OpenCL kernel to update bodies
-const char *update_kernel_source = R"(
-typedef struct {
-    float x, y;
-    float vx, vy;
-    float mass;
-} Body;
+const char *update_kernel_source =
+"typedef struct {\n"
+"    float x, y;\n"
+"    float vx, vy;\n"
+"    float mass;\n"
+"} Body;\n"
+"\n"
+"__kernel void update_bodies(__global Body *bodies,\n"
+"                            __global const float *fx,\n"
+"                            __global const float *fy,\n"
+"                            const float dt,\n"
+"                            const int num_bodies)\n"
+"{\n"
+"    int i = get_global_id(0);\n"
+"    if (i >= num_bodies) return;\n"
+"\n"
+"    bodies[i].vx += fx[i] / bodies[i].mass * dt;\n"
+"    bodies[i].vy += fy[i] / bodies[i].mass * dt;\n"
+"\n"
+"    bodies[i].x += bodies[i].vx * dt;\n"
+"    bodies[i].y += bodies[i].vy * dt;\n"
+"}\n";
 
-__kernel void update_bodies(__global Body *bodies,
-                            __global const float *fx,
-                            __global const float *fy,
-                            const float dt,
-                            const int num_bodies)
-{
-    int i = get_global_id(0);
-    if (i >= num_bodies) return;
-
-    // Update velocities
-    bodies[i].vx += fx[i] / bodies[i].mass * dt;
-    bodies[i].vy += fy[i] / bodies[i].mass * dt;
-
-    // Update positions
-    bodies[i].x += bodies[i].vx * dt;
-    bodies[i].y += bodies[i].vy * dt;
-}
-)";
 
 static void check_err(cl_int err, const char *where) {
     if (err != CL_SUCCESS) {
